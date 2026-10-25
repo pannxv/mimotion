@@ -2,7 +2,7 @@ name: 刷步数
 
 on:
   schedule:
-    - cron: '49 10,12 * * *'
+    - cron: '55 0,2,4,6,8,14 * * *'
   workflow_dispatch:
 
 # 允许使用内置 GITHUB_TOKEN 作为 PAT 推送失败时的兜底，避免因为 token 权限问题导致整个任务失败
