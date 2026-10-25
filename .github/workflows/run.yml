@@ -54,14 +54,6 @@ jobs:
           pip3 install -r requirements.txt
           python3 main.py
 
-      - name: 反查云端步数
-        continue-on-error: true
-        env:
-            CONFIG: ${{ secrets.CONFIG }}
-            AES_KEY: ${{ secrets.AES_KEY }}
-        run: |
-          python3 check_steps.py
-
       - name: persist tokens
         env:
           GH_TOKEN: ${{ github.token }}
