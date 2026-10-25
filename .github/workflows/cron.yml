@@ -1,0 +1,61 @@
+name: Random Cron
+on:
+  workflow_run:
+    workflows: ["刷步数"]
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  repo-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.PAT }} #此处PAT需要申请，教程详见：README
+          persist-credentials: true
+
+      - name: random cron
+        run: |
+          set -u
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          source cron_convert.sh
+          echo "configed CRON_HOURS ${{ vars.CRON_HOURS }}"
+          msg="[$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')] random cron trigger by ${{ github.event_name }}"
+
+          # 先对齐远端最新，避免多个 Random Cron 并发（或本地是旧提交）时撞成 non-fast-forward
+          git fetch origin master
+          git reset --hard origin/master
+          persist_execute_log "${{ github.event_name }}" "${{ vars.CRON_HOURS }}"
+          git add .
+          if git diff --cached --quiet; then
+            echo "cron 表达式没有变化，跳过提交。"
+            exit 0
+          fi
+          git commit -m "$msg"
+          if git push origin HEAD:master; then
+            echo "cron 更新提交成功。"
+            exit 0
+          fi
+
+          # 推送被拒（有人在这几秒里提交了）→ 重新基于最新代码算一次，再试一次
+          echo "::warning::推送被拒绝，可能与其他提交并发，重新基于远端最新代码计算并重试一次。"
+          git fetch origin master
+          git reset --hard origin/master
+          persist_execute_log "${{ github.event_name }}" "${{ vars.CRON_HOURS }}"
+          git add .
+          if git diff --cached --quiet; then
+            echo "重算后 cron 表达式没有变化，跳过提交。"
+            exit 0
+          fi
+          git commit -m "$msg"
+          if git push origin HEAD:master; then
+            echo "cron 更新提交成功（重试）。"
+            exit 0
+          fi
+
+          echo "::error::cron 更新推送失败。本步骤会修改 .github/workflows/run.yml，PAT 必须具备 Workflows:Read and write（classic token 需要 workflow scope）以及 Contents:Read and write 权限。"
+          exit 1

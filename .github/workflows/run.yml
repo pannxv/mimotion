@@ -1,0 +1,101 @@
+name: 刷步数
+
+on:
+  schedule:
+    - cron: '11 0,2,4,6,8,14 * * *'
+  workflow_dispatch:
+
+# 允许使用内置 GITHUB_TOKEN 作为 PAT 推送失败时的兜底，避免因为 token 权限问题导致整个任务失败
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout codes
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.PAT }} #此处PAT需要申请，教程详见：README
+          persist-credentials: true
+
+      - name: Update system and install zsh
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get install zsh -y
+
+      - name: 初始化Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: 检查 Secret 配置
+        env:
+          PAT: ${{ secrets.PAT }}
+          CONFIG: ${{ secrets.CONFIG }}
+          AES_KEY: ${{ secrets.AES_KEY }}
+        run: |
+          if [ -z "$CONFIG" ]; then
+            echo "::warning::未检测到 CONFIG Secret（如果你是用 USER/PWD 配置账号的可忽略；否则刷步数会失败，请按 README 添加 CONFIG）。"
+          fi
+          if [ "${#AES_KEY}" -ne 16 ]; then
+            echo "::warning::AES_KEY 未配置或长度不是 16 个字符，本次不会加密保存登录 token（刷步数仍会执行，但每次都要重新登录）。"
+          fi
+          if [ -z "$PAT" ]; then
+            echo "::warning::未配置 PAT Secret，登录 token 无法提交回仓库。"
+          fi
+
+      - name: 开始
+        env:
+            CONFIG: ${{ secrets.CONFIG }}
+            AES_KEY: ${{ secrets.AES_KEY }}
+        run: |
+          pip3 install -r requirements.txt
+          python3 main.py
+
+      - name: persist tokens
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -u
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+
+          # encrypted_tokens.data 是二进制文件且每次运行都会变；重跑旧运行或并发运行时会和远端版本
+          # 冲突（rebase 报 CONFLICT、push 报 non-fast-forward）。所以这里不再 merge：
+          # 先把本轮结果备份出来，直接对齐远端最新，再把我们新生成的文件覆盖上去提交。
+          NEW_TOKENS="${RUNNER_TEMP}/encrypted_tokens.new"
+          rm -f "$NEW_TOKENS"
+          if [ -f encrypted_tokens.data ]; then
+            cp encrypted_tokens.data "$NEW_TOKENS"
+          fi
+
+          git fetch origin master
+          git reset --hard origin/master
+          if [ -f "$NEW_TOKENS" ]; then
+            cp "$NEW_TOKENS" encrypted_tokens.data
+          fi
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有需要持久化的变更（AES_KEY 未配置或 token 未变化），跳过提交。"
+            exit 0
+          fi
+          git commit -m "persist tokens trigger by ${EVENT}"
+
+          if git push origin HEAD:master; then
+            echo "token 持久化提交成功。"
+            exit 0
+          fi
+
+          echo "::warning::使用 PAT 推送失败，改用仓库内置 GITHUB_TOKEN 重试。请检查 PAT 是否具备 Contents:Read and write 权限。"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git push HEAD:master; then
+            echo "已使用内置 GITHUB_TOKEN 完成提交。建议尽快修正 PAT 权限，否则 Random Cron 更新定时任务会继续失败。"
+            exit 0
+          fi
+
+          echo "::error::token 持久化提交失败。请检查：1) PAT 是否已过期；2) Fine-grained PAT 的 Repository access 是否包含 ${REPO}；3) Contents 权限是否为 Read and write。"
+          exit 1
